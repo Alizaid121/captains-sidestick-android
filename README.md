@@ -30,4 +30,4 @@ See [Releases](../../releases) for latest APK
 
 ## PC App
 Download the PC server app here:
-[Captain's Sidestick PC](https://github.com/YOURUSERNAME/captains-sidestick-pc)
+[Captain's Sidestick PC](https://github.com/Alizaid121/captains-sidestick-pc)

@@ -1,10 +1,18 @@
 // lib/widgets/rudder_slider.dart
 //
-// Horizontal rudder pedal slider.
-//   • Neutral at centre (value 0.0)
-//   • Deflects left (−1.0) or right (+1.0)
-//   • Spring-returns to 0.0 when finger lifts
-//   • Amber filled bar grows from centre outward
+// Horizontal rudder pedal slider — completely rewritten for Fix 1.
+//
+// Root cause of previous bug: Listener + Positioned coordinate maths were
+// unreliable inside a Stack with padding offsets. The thumb appeared to move
+// but value updates were fired with wrong coordinates because localPosition
+// was relative to the Listener widget, not the track.
+//
+// Fix: GestureDetector with onHorizontalDragUpdate using drag *delta*
+// accumulated into a [-1, +1] value. LayoutBuilder provides exact track
+// width at paint time. Thumb position is derived purely from the clamped
+// value, so visual and logical positions are always in sync.
+//
+// Spring-back on drag end: AnimationController tweens value → 0.0 over 200ms.
 
 import 'package:flutter/material.dart';
 import '../main.dart';
@@ -12,15 +20,13 @@ import '../main.dart';
 class RudderSlider extends StatefulWidget {
   const RudderSlider({
     super.key,
-    required this.value,        // −1.0 … +1.0
+    required this.value,
     required this.onChanged,
-    this.width  = 240.0,
-    this.height = 44.0,
+    this.height = 56.0,
   });
 
   final double value;
   final ValueChanged<double> onChanged;
-  final double width;
   final double height;
 
   @override
@@ -29,22 +35,24 @@ class RudderSlider extends StatefulWidget {
 
 class _RudderSliderState extends State<RudderSlider>
     with SingleTickerProviderStateMixin {
+
   double _value    = 0.0;
   bool   _dragging = false;
 
-  // Spring-back animation
-  late AnimationController _springCtrl;
-  late Animation<double>   _springAnim;
+  // Track width captured from LayoutBuilder — used by drag delta maths.
+  double _trackWidth = 1.0;
+
+  // Spring-back controller
+  late final AnimationController _springCtrl = AnimationController(
+    vsync:    this,
+    duration: const Duration(milliseconds: 200),
+  );
+  Animation<double>? _springAnim;
 
   @override
   void initState() {
     super.initState();
     _value = widget.value;
-
-    _springCtrl = AnimationController(
-      vsync:    this,
-      duration: const Duration(milliseconds: 200),
-    );
   }
 
   @override
@@ -53,146 +61,158 @@ class _RudderSliderState extends State<RudderSlider>
     super.dispose();
   }
 
-  void _startSpringBack() {
+  // ── Drag handlers ─────────────────────────────────────────────────────────
+
+  void _onDragStart(DragStartDetails _) {
+    _springCtrl.stop();
+    setState(() => _dragging = true);
+  }
+
+  void _onDragUpdate(DragUpdateDetails d) {
+    // Convert pixel delta to value delta:
+    //   full track width = 2.0 units (−1 to +1)
+    final delta = d.delta.dx / _trackWidth * 2.0;
+    setState(() {
+      _value = (_value + delta).clamp(-1.0, 1.0);
+    });
+    widget.onChanged(_value);
+  }
+
+  void _onDragEnd(DragEndDetails _) {
+    setState(() => _dragging = false);
+    _springBack();
+  }
+
+  void _onDragCancel() {
+    setState(() => _dragging = false);
+    _springBack();
+  }
+
+  void _springBack() {
     _springAnim = Tween<double>(begin: _value, end: 0.0).animate(
       CurvedAnimation(parent: _springCtrl, curve: Curves.easeOut),
     )..addListener(() {
-      setState(() => _value = _springAnim.value);
-      widget.onChanged(_springAnim.value);
+      if (!mounted) return;
+      setState(() => _value = _springAnim!.value);
+      widget.onChanged(_value);
     });
     _springCtrl
       ..reset()
       ..forward();
   }
 
-  double _xToValue(double localX, double trackW) {
-    final v = (localX / trackW) * 2.0 - 1.0;
-    return v.clamp(-1.0, 1.0);
-  }
+  // ── Build ─────────────────────────────────────────────────────────────────
 
   @override
   Widget build(BuildContext context) {
-    const padH = 8.0;   // horizontal padding inside container
+    const trackH  = 12.0;
+    const thumbW  = 22.0;
+    const thumbH  = 34.0;
+    const labelW  = 14.0;   // width reserved for L / R labels
 
     return SizedBox(
-      width:  widget.width,
       height: widget.height,
-      child:  LayoutBuilder(
-        builder: (ctx, constraints) {
-          final trackW = constraints.maxWidth - padH * 2;
-          final trackH = 14.0;
-          final cy     = constraints.maxHeight / 2;
+      child: LayoutBuilder(builder: (ctx, constraints) {
+        // Usable track width (excluding label gutters on each side)
+        _trackWidth = (constraints.maxWidth - labelW * 2).clamp(1.0, double.infinity);
 
-          // Thumb position 0..trackW
-          final thumbX = padH + ((_value + 1.0) / 2.0) * trackW;
+        final cy      = constraints.maxHeight / 2;
+        // Thumb centre X, relative to left edge of track area (after labelW)
+        final thumbCx = labelW + (_value + 1.0) / 2.0 * _trackWidth;
 
-          // Fill rect from centre outward
-          final centreX = padH + trackW / 2;
-          final fillL   = _value < 0 ? thumbX  : centreX;
-          final fillW   = (_value.abs() / 2.0) * trackW;
+        // Fill from centre of track outward toward thumb
+        final trackCx = labelW + _trackWidth / 2.0;
+        final fillL   = _value < 0 ? thumbCx  : trackCx;
+        final fillW   = (_value.abs() / 2.0 * _trackWidth).clamp(0.0, _trackWidth);
 
-          return Stack(
+        return GestureDetector(
+          behavior:          HitTestBehavior.opaque,
+          onHorizontalDragStart:  _onDragStart,
+          onHorizontalDragUpdate: _onDragUpdate,
+          onHorizontalDragEnd:    _onDragEnd,
+          onHorizontalDragCancel: _onDragCancel,
+          child: Stack(
             clipBehavior: Clip.none,
             children: [
-              // ── Track ────────────────────────────────────────────────
+
+              // ── L label ─────────────────────────────────────────────────
               Positioned(
-                top:  cy - trackH / 2,
-                left: padH,
+                left: 0,
+                top:  cy - 7,
+                child: const Text('L', style: _labelStyle),
+              ),
+
+              // ── R label ─────────────────────────────────────────────────
+              Positioned(
+                right: 0,
+                top:   cy - 7,
+                child: const Text('R', style: _labelStyle),
+              ),
+
+              // ── Track background ─────────────────────────────────────────
+              Positioned(
+                left:   labelW,
+                top:    cy - trackH / 2,
+                width:  _trackWidth,
+                height: trackH,
                 child: Container(
-                  width:  trackW,
-                  height: trackH,
                   decoration: BoxDecoration(
                     color:        kNavy2,
-                    borderRadius: BorderRadius.circular(7),
+                    borderRadius: BorderRadius.circular(6),
                     border:       Border.all(color: kDim, width: 1),
                   ),
                 ),
               ),
 
-              // ── Filled portion ────────────────────────────────────────
-              Positioned(
-                top:  cy - trackH / 2,
-                left: fillL,
-                child: Container(
+              // ── Fill (centre → thumb) ─────────────────────────────────────
+              if (fillW > 0)
+                Positioned(
+                  left:   fillL,
+                  top:    cy - trackH / 2 + 1,
                   width:  fillW,
-                  height: trackH,
-                  decoration: BoxDecoration(
-                    color: kAmber.withOpacity(0.65),
-                    borderRadius: BorderRadius.circular(4),
+                  height: trackH - 2,
+                  child: Container(
+                    decoration: BoxDecoration(
+                      color:        kAmber.withOpacity(0.65),
+                      borderRadius: BorderRadius.circular(4),
+                    ),
                   ),
                 ),
+
+              // ── Centre tick ───────────────────────────────────────────────
+              Positioned(
+                left:   trackCx - 1,
+                top:    cy - 10,
+                width:  2,
+                height: 20,
+                child: Container(color: kDim.withOpacity(0.6)),
               ),
 
-              // ── Centre tick ───────────────────────────────────────────
+              // ── Thumb ────────────────────────────────────────────────────
               Positioned(
-                top:  cy - 10,
-                left: padH + trackW / 2 - 1,
-                child: Container(width: 2, height: 20, color: kDim),
-              ),
-
-              // ── L / R labels ──────────────────────────────────────────
-              Positioned(
-                top:  cy - 8,
-                left: 0,
-                child: Text('L', style: _labelStyle),
-              ),
-              Positioned(
-                top:  cy - 8,
-                right: 0,
-                child: Text('R', style: _labelStyle),
-              ),
-
-              // ── Thumb ─────────────────────────────────────────────────
-              Positioned(
-                top:  cy - 14,
-                left: thumbX - 10,
-                child: Container(
-                  width:  20,
-                  height: 28,
+                left:   thumbCx - thumbW / 2,
+                top:    cy - thumbH / 2,
+                width:  thumbW,
+                height: thumbH,
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 40),
                   decoration: BoxDecoration(
-                    color:        _dragging ? kAmber : kAmberD,
+                    color: _dragging ? kAmber : kAmberD,
                     borderRadius: BorderRadius.circular(5),
                     boxShadow: [
-                      BoxShadow(color: kAmber.withOpacity(0.4), blurRadius: 6),
+                      BoxShadow(
+                        color:      kAmber.withOpacity(_dragging ? 0.6 : 0.3),
+                        blurRadius: _dragging ? 10 : 5,
+                      ),
                     ],
                   ),
                 ),
               ),
 
-              // ── Touch layer ───────────────────────────────────────────
-              Positioned.fill(
-                child: Listener(
-                  onPointerDown: (e) {
-                    _springCtrl.stop();
-                    setState(() {
-                      _dragging = true;
-                      _value = _xToValue(e.localPosition.dx - padH, trackW);
-                    });
-                    widget.onChanged(_value);
-                  },
-                  onPointerMove: (e) {
-                    setState(() {
-                      _value = _xToValue(e.localPosition.dx - padH, trackW);
-                    });
-                    widget.onChanged(_value);
-                  },
-                  onPointerUp: (_) {
-                    setState(() => _dragging = false);
-                    _startSpringBack();
-                    widget.onChanged(0.0);
-                  },
-                  onPointerCancel: (_) {
-                    setState(() => _dragging = false);
-                    _startSpringBack();
-                    widget.onChanged(0.0);
-                  },
-                  child: const SizedBox.expand(),
-                ),
-              ),
             ],
-          );
-        },
-      ),
+          ),
+        );
+      }),
     );
   }
 

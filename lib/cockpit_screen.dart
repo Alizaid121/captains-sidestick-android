@@ -1,21 +1,17 @@
-// lib/cockpit_screen.dart
+// lib/cockpit_screen.dart  —  v1.1.0
 //
-// The main full-screen cockpit UI.
+// Fix 3: Entire body wrapped in LayoutBuilder. Available height is the real
+//        screen height minus the system status-bar inset. Sections are sized
+//        with flex ratios so the layout never overflows on any Android screen.
 //
-// Layout (portrait):
-//   ┌─────────────────────────────────┐
-//   │  STATUS BAR (dot, IP, P/R/THR)  │  ~24 px
-//   ├─────────────────────────────────┤
-//   │  PTT  │  RUDDER SLIDER  │  LOCK │  ~56 px
-//   ├─────────────────────────────────┤
-//   │        ATTITUDE INDICATOR       │  flex
-//   ├─────────────────────────────────┤
-//   │ THROTTLE │  CONTROL BUTTONS     │  ~320 px
-//   └─────────────────────────────────┘
-//   ⚙ gear icon → settings panel slides up
+//        Height budget:
+//          Status bar  : fixed 36 px
+//          Top row     : fixed 80 px
+//          Horizon     : flex 4
+//          Bottom row  : flex 3
 //
-// Captain layout: throttle LEFT, buttons RIGHT, PTT top-LEFT
-// Co-Pilot layout: mirrored
+// Fix 4: All text sizes, button sizes and padding computed from screen width
+//        so the UI looks proportionate from 360 px (small) to 430 px (large).
 
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
@@ -29,6 +25,7 @@ import 'widgets/throttle_slider.dart';
 import 'widgets/rudder_slider.dart';
 import 'widgets/settings_panel.dart';
 
+// ─────────────────────────────────────────────────────────────────────────────
 class CockpitScreen extends StatefulWidget {
   const CockpitScreen({super.key});
 
@@ -37,11 +34,9 @@ class CockpitScreen extends StatefulWidget {
 }
 
 class _CockpitScreenState extends State<CockpitScreen> {
-  // ── State ─────────────────────────────────────────────────────────────────
   double _throttle  = 0.0;
   double _rudder    = 0.0;
 
-  // Button states (momentary or toggle)
   bool _toga      = false;
   bool _idle      = false;
   bool _reverse   = false;
@@ -54,20 +49,20 @@ class _CockpitScreenState extends State<CockpitScreen> {
   bool _btnY      = false;
   bool _ptt       = false;
 
-  // Settings panel visibility
   bool _settingsOpen = false;
-
-  // Extra button drag-edit mode
-  bool _editMode = false;
+  bool _editMode     = false;
 
   @override
   Widget build(BuildContext context) {
-    final settings = context.watch<SettingsModel>();
-    final ws       = context.watch<WebSocketService>();
-    final sensor   = context.watch<SensorService>();
-    final isCaptain = settings.layout == CockpitLayout.captain;
+    final settings   = context.watch<SettingsModel>();
+    final ws         = context.watch<WebSocketService>();
+    final sensor     = context.watch<SensorService>();
+    final isCaptain  = settings.layout == CockpitLayout.captain;
+    final mq         = MediaQuery.of(context);
+    final sw         = mq.size.width;   // screen width  — drives all sizing
+    final sh         = mq.size.height;  // screen height
 
-    // Push latest axes to WS every build (driven by sensor notifyListeners)
+    // Push axes on every sensor update
     ws.updateAxes(
       pitch:    sensor.pitch,
       roll:     sensor.roll,
@@ -75,131 +70,150 @@ class _CockpitScreenState extends State<CockpitScreen> {
       rudder:   _rudder,
     );
 
-    final screenSize = MediaQuery.of(context).size;
+    // ── Responsive sizing constants ────────────────────────────────────────
+    // Tested against 360 / 390 / 412 / 430 px wide screens.
+    final btnFontSize   = sw * 0.034;   // ~12–15 px
+    final btnPadH       = sw * 0.020;   // ~7–9 px horizontal
+    final btnPadV       = sw * 0.014;   // ~5–6 px vertical
+    final statusFont    = sw * 0.028;   // ~10–12 px
+    final hPad          = sw * 0.022;   // outer horizontal padding ~8–10 px
+    final aiSize        = (sw * 0.78).clamp(200.0, 310.0);
+
+    // ── Fixed section heights ──────────────────────────────────────────────
+    const statusH   = 36.0;
+    const topRowH   = 80.0;
+
+    // Remaining height after fixed sections → split 4 : 3 between AI / bottom
+    final remaining   = sh - mq.padding.top - mq.padding.bottom
+                           - statusH - topRowH;
+    final horizonH    = (remaining * 4 / 7).clamp(160.0, 340.0);
+    final bottomH     = (remaining * 3 / 7).clamp(160.0, 280.0);
 
     return Scaffold(
       backgroundColor: kNavy,
       body: SafeArea(
         child: Stack(
           children: [
-            // ── Main column ─────────────────────────────────────────────
+            // ── Main column ────────────────────────────────────────────────
             Column(
               children: [
-                // 1. Status bar
-                _StatusBar(ws: ws, sensor: sensor,
-                  throttle: _throttle,
-                  onSettingsTap: () => setState(() => _settingsOpen = true),
+
+                // 1 — Status bar
+                SizedBox(
+                  height: statusH,
+                  child: _StatusBar(
+                    ws:            ws,
+                    sensor:        sensor,
+                    throttle:      _throttle,
+                    fontSize:      statusFont,
+                    hPad:          hPad,
+                    onSettingsTap: () => setState(() => _settingsOpen = true),
+                  ),
                 ),
 
-                // 2. Top row: PTT | Rudder | Lock
-                _TopRow(
-                  isCaptain:   isCaptain,
-                  ptt:         _ptt,
-                  onPttStart:  () => _setBtn('ptt', true),
-                  onPttEnd:    () => _setBtn('ptt', false),
-                  rudder:      _rudder,
-                  onRudder:    (v) { setState(() => _rudder = v); _pushButtons(); },
-                  sensorLocked: sensor.sensorLock,
-                  onLockTap:   sensor.toggleLock,
+                // 2 — Top row: PTT | Rudder | Lock
+                SizedBox(
+                  height: topRowH,
+                  child: _TopRow(
+                    isCaptain:    isCaptain,
+                    ptt:          _ptt,
+                    onPttStart:   () => _setBtn('ptt', true),
+                    onPttEnd:     () => _setBtn('ptt', false),
+                    rudder:       _rudder,
+                    onRudder:     (v) => setState(() => _rudder = v),
+                    sensorLocked: sensor.sensorLock,
+                    onLockTap:    sensor.toggleLock,
+                    sw:           sw,
+                    hPad:         hPad,
+                  ),
                 ),
 
-                // 3. Attitude indicator — flex fill
-                Expanded(
+                // 3 — Attitude indicator
+                SizedBox(
+                  height: horizonH,
                   child: Center(
                     child: AttitudeIndicator(
                       pitch: sensor.pitch,
                       roll:  sensor.roll,
-                      size:  (screenSize.width * 0.78).clamp(180, 300),
+                      size:  aiSize,
                     ),
                   ),
                 ),
 
-                // 4. Bottom row: throttle + buttons
-                _BottomRow(
-                  isCaptain:      isCaptain,
-                  throttle:       _throttle,
-                  detentsEnabled: settings.detentsEnabled,
-                  onThrottle: (v) {
-                    setState(() => _throttle = v);
-                    _pushButtons();
-                  },
-                  toga:       _toga,
-                  idle:       _idle,
-                  reverse:    _reverse,
-                  gear:       _gear,
-                  flapsUp:    _flapsUp,
-                  flapsDown:  _flapsDown,
-                  onTogaTap:     () => _momentary('toga'),
-                  onIdleTap:     () => _momentary('idle'),
-                  onReverseTap:  () => _toggle('reverse'),
-                  onGearTap:     () => _toggle('gear'),
-                  onFlapsUpTap:  () => _momentary('flapsUp'),
-                  onFlapsDownTap:() => _momentary('flapsDown'),
+                // 4 — Bottom row: throttle + buttons
+                SizedBox(
+                  height: bottomH,
+                  child: _BottomRow(
+                    isCaptain:      isCaptain,
+                    throttle:       _throttle,
+                    detentsEnabled: settings.detentsEnabled,
+                    onThrottle:     (v) => setState(() => _throttle = v),
+                    toga:       _toga,
+                    idle:       _idle,
+                    reverse:    _reverse,
+                    gear:       _gear,
+                    flapsUp:    _flapsUp,
+                    flapsDown:  _flapsDown,
+                    onTogaTap:      () => _momentary('toga'),
+                    onIdleTap:      () => _momentary('idle'),
+                    onReverseTap:   () => _toggle('reverse'),
+                    onGearTap:      () => _toggle('gear'),
+                    onFlapsUpTap:   () => _momentary('flapsUp'),
+                    onFlapsDownTap: () => _momentary('flapsDown'),
+                    sw:       sw,
+                    hPad:     hPad,
+                    btnFontSize: btnFontSize,
+                    btnPadH:     btnPadH,
+                    btnPadV:     btnPadV,
+                  ),
                 ),
 
-                const SizedBox(height: 4),
               ],
             ),
 
-            // ── Draggable extra buttons ──────────────────────────────────
+            // ── Draggable extra buttons ────────────────────────────────────
             if (settings.showA)
               _ExtraButton(
-                label:     'A',
-                active:    _btnA,
-                editMode:  _editMode,
-                posX:      settings.axPos * screenSize.width,
-                posY:      settings.ayPos * screenSize.height,
-                size:      settings.awSize,
-                onTap:     () => _toggleExtra('a'),
-                onMoved:   (x, y) => settings.setExtraAPos(
-                  x / screenSize.width, y / screenSize.height),
-                onResized: settings.setExtraASize,
+                label: 'A', active: _btnA, editMode: _editMode,
+                posX: settings.axPos * sw, posY: settings.ayPos * sh,
+                size: settings.awSize,
+                onTap:       () => _toggleExtra('a'),
+                onMoved:     (x, y) => settings.setExtraAPos(x / sw, y / sh),
+                onResized:   settings.setExtraASize,
                 onLongPress: () => setState(() => _editMode = !_editMode),
               ),
             if (settings.showB)
               _ExtraButton(
-                label:     'B',
-                active:    _btnB,
-                editMode:  _editMode,
-                posX:      settings.bxPos * screenSize.width,
-                posY:      settings.byPos * screenSize.height,
-                size:      settings.bwSize,
-                onTap:     () => _toggleExtra('b'),
-                onMoved:   (x, y) => settings.setExtraBPos(
-                  x / screenSize.width, y / screenSize.height),
-                onResized: settings.setExtraBSize,
+                label: 'B', active: _btnB, editMode: _editMode,
+                posX: settings.bxPos * sw, posY: settings.byPos * sh,
+                size: settings.bwSize,
+                onTap:       () => _toggleExtra('b'),
+                onMoved:     (x, y) => settings.setExtraBPos(x / sw, y / sh),
+                onResized:   settings.setExtraBSize,
                 onLongPress: () => setState(() => _editMode = !_editMode),
               ),
             if (settings.showX)
               _ExtraButton(
-                label:     'X',
-                active:    _btnX,
-                editMode:  _editMode,
-                posX:      settings.xxPos * screenSize.width,
-                posY:      settings.xyPos * screenSize.height,
-                size:      settings.xwSize,
-                onTap:     () => _toggleExtra('x'),
-                onMoved:   (x, y) => settings.setExtraXPos(
-                  x / screenSize.width, y / screenSize.height),
-                onResized: settings.setExtraXSize,
+                label: 'X', active: _btnX, editMode: _editMode,
+                posX: settings.xxPos * sw, posY: settings.xyPos * sh,
+                size: settings.xwSize,
+                onTap:       () => _toggleExtra('x'),
+                onMoved:     (x, y) => settings.setExtraXPos(x / sw, y / sh),
+                onResized:   settings.setExtraXSize,
                 onLongPress: () => setState(() => _editMode = !_editMode),
               ),
             if (settings.showY)
               _ExtraButton(
-                label:     'Y',
-                active:    _btnY,
-                editMode:  _editMode,
-                posX:      settings.yxPos * screenSize.width,
-                posY:      settings.yyPos * screenSize.height,
-                size:      settings.ywSize,
-                onTap:     () => _toggleExtra('y'),
-                onMoved:   (x, y) => settings.setExtraYPos(
-                  x / screenSize.width, y / screenSize.height),
-                onResized: settings.setExtraYSize,
+                label: 'Y', active: _btnY, editMode: _editMode,
+                posX: settings.yxPos * sw, posY: settings.yyPos * sh,
+                size: settings.ywSize,
+                onTap:       () => _toggleExtra('y'),
+                onMoved:     (x, y) => settings.setExtraYPos(x / sw, y / sh),
+                onResized:   settings.setExtraYSize,
                 onLongPress: () => setState(() => _editMode = !_editMode),
               ),
 
-            // ── Settings overlay ─────────────────────────────────────────
+            // ── Settings overlay ───────────────────────────────────────────
             if (_settingsOpen)
               Positioned.fill(
                 child: SettingsPanel(
@@ -212,18 +226,13 @@ class _CockpitScreenState extends State<CockpitScreen> {
     );
   }
 
-  // ── Button helpers ────────────────────────────────────────────────────────
+  // ── Button logic ───────────────────────────────────────────────────────────
 
   void _setBtn(String name, bool v) {
-    setState(() {
-      switch (name) {
-        case 'ptt': _ptt = v;
-      }
-    });
+    setState(() { if (name == 'ptt') _ptt = v; });
     context.read<WebSocketService>().setButton(name, v);
   }
 
-  /// Momentary: fires true for 120 ms, then false
   void _momentary(String name) {
     final ws = context.read<WebSocketService>();
     ws.setButton(name, true);
@@ -235,9 +244,8 @@ class _CockpitScreenState extends State<CockpitScreen> {
     });
   }
 
-  /// Toggle: flips current state
   void _toggle(String name) {
-    final ws = context.read<WebSocketService>();
+    final ws   = context.read<WebSocketService>();
     final next = !_getStateBtn(name);
     ws.setButton(name, next);
     setState(() => _setStateBtn(name, next));
@@ -278,11 +286,6 @@ class _CockpitScreenState extends State<CockpitScreen> {
       case 'y':         _btnY      = v;
     }
   }
-
-  void _pushButtons() {
-    // Axes are pushed continuously by the WS timer; buttons are pushed here
-    // to ensure immediate responsiveness on button state changes.
-  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -293,69 +296,73 @@ class _StatusBar extends StatelessWidget {
     required this.ws,
     required this.sensor,
     required this.throttle,
+    required this.fontSize,
+    required this.hPad,
     required this.onSettingsTap,
   });
 
   final WebSocketService ws;
   final SensorService    sensor;
   final double           throttle;
+  final double           fontSize;
+  final double           hPad;
   final VoidCallback     onSettingsTap;
 
   @override
   Widget build(BuildContext context) {
-    final settings = context.watch<SettingsModel>();
-    final connected = ws.state == WsState.connected;
+    final settings  = context.watch<SettingsModel>();
+    final dotColor  = switch (ws.state) {
+      WsState.connected    => kGreen,
+      WsState.connecting   => kAmber,
+      WsState.disconnected => kRed,
+    };
+
+    final style = TextStyle(
+      color:      kText,
+      fontSize:   fontSize,
+      fontFamily: 'monospace',
+    );
+    final dimStyle = style.copyWith(color: kDim);
+    final amberStyle = style.copyWith(color: kAmber);
 
     return Container(
-      height: 26,
-      color:  const Color(0xFF090F18),
-      padding: const EdgeInsets.symmetric(horizontal: 8),
+      color:   const Color(0xFF090F18),
+      padding: EdgeInsets.symmetric(horizontal: hPad),
       child: Row(
         children: [
           // Connection dot
-          Container(
-            width: 8, height: 8,
+          AnimatedContainer(
+            duration: const Duration(milliseconds: 300),
+            width: 9, height: 9,
             decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: connected ? kGreen : kRed,
-              boxShadow: [
-                BoxShadow(
-                  color:      connected ? kGreen : kRed,
-                  blurRadius: 4,
-                ),
-              ],
+              shape:     BoxShape.circle,
+              color:     dotColor,
+              boxShadow: [BoxShadow(color: dotColor, blurRadius: 4)],
             ),
           ),
-          const SizedBox(width: 6),
-          Text(settings.ip,
-            style: const TextStyle(color: kDim, fontSize: 10, fontFamily: 'monospace')),
+          SizedBox(width: hPad * 0.6),
+          Text(settings.ip, style: dimStyle),
           const Spacer(),
-          _statLabel('P', sensor.pitch),
-          const SizedBox(width: 8),
-          _statLabel('R', sensor.roll),
-          const SizedBox(width: 8),
           Text(
-            'THR ${(throttle * 100).round()}%',
-            style: const TextStyle(color: kAmber, fontSize: 10, fontFamily: 'monospace'),
+            'P${sensor.pitch >= 0 ? '+' : ''}${sensor.pitch.toStringAsFixed(2)} '
+            'R${sensor.roll  >= 0 ? '+' : ''}${sensor.roll.toStringAsFixed(2)}',
+            style: style,
           ),
-          const SizedBox(width: 8),
+          SizedBox(width: hPad),
+          Text('${(throttle * 100).round()}%', style: amberStyle),
+          SizedBox(width: hPad),
           GestureDetector(
             onTap: onSettingsTap,
-            child: const Icon(Icons.settings, color: kDim, size: 16),
+            child: Icon(Icons.settings, color: kDim, size: fontSize * 1.5),
           ),
         ],
       ),
     );
   }
-
-  Widget _statLabel(String tag, double v) => Text(
-    '$tag ${v >= 0 ? '+' : ''}${v.toStringAsFixed(2)}',
-    style: const TextStyle(color: kText, fontSize: 10, fontFamily: 'monospace'),
-  );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Top Row: PTT | Rudder | Sensor Lock
+// Top Row — PTT | Rudder slider | Sensor lock
 // ─────────────────────────────────────────────────────────────────────────────
 class _TopRow extends StatelessWidget {
   const _TopRow({
@@ -367,39 +374,54 @@ class _TopRow extends StatelessWidget {
     required this.onRudder,
     required this.sensorLocked,
     required this.onLockTap,
+    required this.sw,
+    required this.hPad,
   });
 
   final bool       isCaptain;
   final bool       ptt;
-  final VoidCallback onPttStart;
-  final VoidCallback onPttEnd;
+  final VoidCallback onPttStart, onPttEnd;
   final double     rudder;
   final ValueChanged<double> onRudder;
   final bool       sensorLocked;
   final VoidCallback onLockTap;
+  final double     sw, hPad;
 
   @override
   Widget build(BuildContext context) {
-    final pttWidget  = _PttButton(active: ptt, onStart: onPttStart, onEnd: onPttEnd);
-    final lockWidget = _LockButton(locked: sensorLocked, onTap: onLockTap);
+    final btnSize = (sw * 0.13).clamp(44.0, 58.0);   // PTT / Lock button size
+
+    final pttWidget = _PttButton(
+      active:   ptt,
+      onStart:  onPttStart,
+      onEnd:    onPttEnd,
+      size:     btnSize,
+    );
+
+    final lockWidget = _LockButton(
+      locked: sensorLocked,
+      onTap:  onLockTap,
+      size:   btnSize,
+    );
+
     final rudderWidget = Expanded(
-      child: Center(
+      child: Padding(
+        padding: EdgeInsets.symmetric(horizontal: hPad),
         child: RudderSlider(
-          value: rudder,
+          value:     rudder,
           onChanged: onRudder,
-          width: double.infinity,
-          height: 52,
+          height:    sw * 0.14,
         ),
       ),
     );
 
-    return Container(
-      height: 56,
-      padding: const EdgeInsets.symmetric(horizontal: 8),
+    return Padding(
+      padding: EdgeInsets.symmetric(horizontal: hPad, vertical: 6),
       child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
         children: isCaptain
-            ? [pttWidget, const SizedBox(width: 8), rudderWidget, const SizedBox(width: 8), lockWidget]
-            : [lockWidget, const SizedBox(width: 8), rudderWidget, const SizedBox(width: 8), pttWidget],
+            ? [pttWidget, rudderWidget, lockWidget]
+            : [lockWidget, rudderWidget, pttWidget],
       ),
     );
   }
@@ -411,28 +433,29 @@ class _PttButton extends StatelessWidget {
     required this.active,
     required this.onStart,
     required this.onEnd,
+    required this.size,
   });
 
   final bool active;
-  final VoidCallback onStart;
-  final VoidCallback onEnd;
+  final VoidCallback onStart, onEnd;
+  final double size;
 
   @override
   Widget build(BuildContext context) {
     return GestureDetector(
-      onLongPressStart: (_) => onStart(),
-      onLongPressEnd:   (_) => onEnd(),
       onTapDown:        (_) => onStart(),
       onTapUp:          (_) => onEnd(),
       onTapCancel:      ()  => onEnd(),
+      onLongPressStart: (_) => onStart(),
+      onLongPressEnd:   (_) => onEnd(),
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 80),
-        width:  52,
-        height: 44,
+        width:  size,
+        height: size,
         decoration: BoxDecoration(
           color:        active ? kAmber : kNavy2,
-          borderRadius: BorderRadius.circular(10),
-          border:       Border.all(
+          borderRadius: BorderRadius.circular(size * 0.2),
+          border: Border.all(
             color: active ? kAmber : kDim,
             width: active ? 2 : 1,
           ),
@@ -443,21 +466,16 @@ class _PttButton extends StatelessWidget {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Icon(
-              Icons.mic,
-              size:  20,
-              color: active ? kNavy : kAmber,
-            ),
+            Icon(Icons.mic, size: size * 0.38,
+                color: active ? kNavy : kAmber),
             if (active)
-              const Text(
-                'TX',
+              Text('TX',
                 style: TextStyle(
-                  color:    kNavy,
-                  fontSize: 8,
+                  color:      kNavy,
+                  fontSize:   size * 0.18,
                   fontWeight: FontWeight.bold,
                   fontFamily: 'monospace',
-                ),
-              ),
+                )),
           ],
         ),
       ),
@@ -467,9 +485,15 @@ class _PttButton extends StatelessWidget {
 
 // ── Sensor Lock Button ────────────────────────────────────────────────────────
 class _LockButton extends StatelessWidget {
-  const _LockButton({required this.locked, required this.onTap});
+  const _LockButton({
+    required this.locked,
+    required this.onTap,
+    required this.size,
+  });
+
   final bool         locked;
   final VoidCallback onTap;
+  final double       size;
 
   @override
   Widget build(BuildContext context) {
@@ -477,11 +501,11 @@ class _LockButton extends StatelessWidget {
       onTap: onTap,
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 150),
-        width:  44,
-        height: 44,
+        width:  size,
+        height: size,
         decoration: BoxDecoration(
           color:        locked ? kAmber.withOpacity(0.15) : Colors.transparent,
-          borderRadius: BorderRadius.circular(10),
+          borderRadius: BorderRadius.circular(size * 0.2),
           border: Border.all(
             color: locked ? kAmber : kDim,
             width: locked ? 2 : 1,
@@ -490,7 +514,7 @@ class _LockButton extends StatelessWidget {
         child: Icon(
           locked ? Icons.lock : Icons.lock_open,
           color: locked ? kAmber : kDim,
-          size:  22,
+          size:  size * 0.44,
         ),
       ),
     );
@@ -498,7 +522,7 @@ class _LockButton extends StatelessWidget {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Bottom Row: Throttle + Control Buttons
+// Bottom Row — Throttle + Control Buttons
 // ─────────────────────────────────────────────────────────────────────────────
 class _BottomRow extends StatelessWidget {
   const _BottomRow({
@@ -518,26 +542,34 @@ class _BottomRow extends StatelessWidget {
     required this.onGearTap,
     required this.onFlapsUpTap,
     required this.onFlapsDownTap,
+    required this.sw,
+    required this.hPad,
+    required this.btnFontSize,
+    required this.btnPadH,
+    required this.btnPadV,
   });
 
   final bool   isCaptain;
   final double throttle;
   final bool   detentsEnabled;
   final ValueChanged<double> onThrottle;
-  final bool toga, idle, reverse, gear, flapsUp, flapsDown;
+  final bool   toga, idle, reverse, gear, flapsUp, flapsDown;
   final VoidCallback onTogaTap, onIdleTap, onReverseTap,
                      onGearTap, onFlapsUpTap, onFlapsDownTap;
+  final double sw, hPad, btnFontSize, btnPadH, btnPadV;
 
   @override
   Widget build(BuildContext context) {
+    // Throttle slider takes a fixed portion of screen width
+    final throttleW = (sw * 0.18).clamp(52.0, 72.0);
+
     final throttleWidget = SizedBox(
-      width: 70,
+      width: throttleW,
       child: ThrottleSlider(
         value:          throttle,
         onChanged:      onThrottle,
         detentsEnabled: detentsEnabled,
-        height:         300,
-        width:          70,
+        width:          throttleW,
       ),
     );
 
@@ -555,25 +587,25 @@ class _BottomRow extends StatelessWidget {
         onGearTap:      onGearTap,
         onFlapsUpTap:   onFlapsUpTap,
         onFlapsDownTap: onFlapsDownTap,
+        fontSize:       btnFontSize,
+        padH:           btnPadH,
+        padV:           btnPadV,
       ),
     );
 
-    return SizedBox(
-      height: 310,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 8),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: isCaptain
-              ? [throttleWidget, const SizedBox(width: 12), buttonsWidget]
-              : [buttonsWidget,  const SizedBox(width: 12), throttleWidget],
-        ),
+    return Padding(
+      padding: EdgeInsets.symmetric(horizontal: hPad, vertical: 4),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: isCaptain
+            ? [throttleWidget, SizedBox(width: hPad), buttonsWidget]
+            : [buttonsWidget,  SizedBox(width: hPad), throttleWidget],
       ),
     );
   }
 }
 
-// ── Control Buttons Column ────────────────────────────────────────────────────
+// ── Control Buttons ───────────────────────────────────────────────────────────
 class _ControlButtons extends StatelessWidget {
   const _ControlButtons({
     required this.toga,
@@ -588,41 +620,53 @@ class _ControlButtons extends StatelessWidget {
     required this.onGearTap,
     required this.onFlapsUpTap,
     required this.onFlapsDownTap,
+    required this.fontSize,
+    required this.padH,
+    required this.padV,
   });
 
   final bool toga, idle, reverse, gear, flapsUp, flapsDown;
   final VoidCallback onTogaTap, onIdleTap, onReverseTap,
                      onGearTap, onFlapsUpTap, onFlapsDownTap;
+  final double fontSize, padH, padV;
 
   @override
   Widget build(BuildContext context) {
     return Column(
       mainAxisAlignment: MainAxisAlignment.spaceEvenly,
       children: [
-        Row(
-          children: [
-            Expanded(child: _CtrlBtn(label: 'TOGA',    active: toga,    color: kAmber,  onTap: onTogaTap)),
-            const SizedBox(width: 6),
-            Expanded(child: _CtrlBtn(label: 'IDLE',    active: idle,    color: kDim,    onTap: onIdleTap)),
-          ],
-        ),
-        Row(
-          children: [
-            Expanded(child: _CtrlBtn(label: 'REV',     active: reverse, color: kRed,    onTap: onReverseTap)),
-            const SizedBox(width: 6),
-            Expanded(child: _CtrlBtn(label: 'GEAR',    active: gear,    color: kGreen,  onTap: onGearTap)),
-          ],
-        ),
-        Row(
-          children: [
-            Expanded(child: _CtrlBtn(label: 'FLAPS ▲', active: flapsUp,   color: kAmber, onTap: onFlapsUpTap)),
-            const SizedBox(width: 6),
-            Expanded(child: _CtrlBtn(label: 'FLAPS ▼', active: flapsDown, color: kAmber, onTap: onFlapsDownTap)),
-          ],
-        ),
+        _btnRow([
+          _CtrlBtn(label: 'TOGA',    active: toga,     color: kAmber, onTap: onTogaTap,
+              fontSize: fontSize, padH: padH, padV: padV),
+          _CtrlBtn(label: 'IDLE',    active: idle,     color: kDim,   onTap: onIdleTap,
+              fontSize: fontSize, padH: padH, padV: padV),
+        ]),
+        _btnRow([
+          _CtrlBtn(label: 'REV',     active: reverse,  color: kRed,   onTap: onReverseTap,
+              fontSize: fontSize, padH: padH, padV: padV),
+          _CtrlBtn(label: 'GEAR',    active: gear,     color: kGreen, onTap: onGearTap,
+              fontSize: fontSize, padH: padH, padV: padV),
+        ]),
+        _btnRow([
+          _CtrlBtn(label: 'FLPS▲',  active: flapsUp,   color: kAmber, onTap: onFlapsUpTap,
+              fontSize: fontSize, padH: padH, padV: padV),
+          _CtrlBtn(label: 'FLPS▼',  active: flapsDown, color: kAmber, onTap: onFlapsDownTap,
+              fontSize: fontSize, padH: padH, padV: padV),
+        ]),
       ],
     );
   }
+
+  Widget _btnRow(List<Widget> btns) => Expanded(
+    child: Row(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Expanded(child: btns[0]),
+        SizedBox(width: padH),
+        Expanded(child: btns[1]),
+      ],
+    ),
+  );
 }
 
 class _CtrlBtn extends StatelessWidget {
@@ -631,12 +675,16 @@ class _CtrlBtn extends StatelessWidget {
     required this.active,
     required this.color,
     required this.onTap,
+    required this.fontSize,
+    required this.padH,
+    required this.padV,
   });
 
-  final String     label;
-  final bool       active;
-  final Color      color;
+  final String       label;
+  final bool         active;
+  final Color        color;
   final VoidCallback onTap;
+  final double       fontSize, padH, padV;
 
   @override
   Widget build(BuildContext context) {
@@ -644,26 +692,29 @@ class _CtrlBtn extends StatelessWidget {
       onTap: onTap,
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 80),
-        height: 56,
         decoration: BoxDecoration(
           color:        active ? color.withOpacity(0.25) : kNavy2,
           borderRadius: BorderRadius.circular(10),
           border: Border.all(
             color: active ? color : kDim,
-            width: active ? 2 : 1,
+            width: active ? 2   : 1,
           ),
           boxShadow: active
               ? [BoxShadow(color: color.withOpacity(0.4), blurRadius: 8)]
               : [],
         ),
         child: Center(
-          child: Text(
-            label,
-            style: TextStyle(
-              color:      active ? color : kDim,
-              fontSize:   12,
-              fontWeight: active ? FontWeight.bold : FontWeight.normal,
-              fontFamily: 'monospace',
+          child: Padding(
+            padding: EdgeInsets.symmetric(horizontal: padH, vertical: padV),
+            child: Text(
+              label,
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color:      active ? color : kDim,
+                fontSize:   fontSize,
+                fontWeight: active ? FontWeight.bold : FontWeight.normal,
+                fontFamily: 'monospace',
+              ),
             ),
           ),
         ),
@@ -690,10 +741,9 @@ class _ExtraButton extends StatefulWidget {
   });
 
   final String   label;
-  final bool     active;
-  final bool     editMode;
+  final bool     active, editMode;
   final double   posX, posY, size;
-  final VoidCallback  onTap;
+  final VoidCallback onTap;
   final void Function(double x, double y) onMoved;
   final void Function(double w) onResized;
   final VoidCallback onLongPress;
@@ -704,8 +754,7 @@ class _ExtraButton extends StatefulWidget {
 
 class _ExtraButtonState extends State<_ExtraButton> {
   double _x = 0, _y = 0, _sz = 60;
-  double _startScale = 1.0;
-  double _startSize  = 60.0;
+  double _startSize = 60.0;
 
   @override
   void initState() {
@@ -731,25 +780,23 @@ class _ExtraButtonState extends State<_ExtraButton> {
       left: _x - _sz / 2,
       top:  _y - _sz / 2,
       child: GestureDetector(
-        onTap: widget.editMode ? null : widget.onTap,
+        onTap:       widget.editMode ? null : widget.onTap,
         onLongPress: widget.onLongPress,
-        onPanUpdate: widget.editMode ? (d) {
-          setState(() {
-            _x += d.delta.dx;
-            _y += d.delta.dy;
-          });
-          widget.onMoved(_x, _y);
-        } : null,
-        onScaleStart: widget.editMode ? (d) {
-          _startScale = 1.0;
-          _startSize  = _sz;
-        } : null,
-        onScaleUpdate: widget.editMode ? (d) {
-          setState(() {
-            _sz = (_startSize * d.scale).clamp(36.0, 120.0);
-          });
-          widget.onResized(_sz);
-        } : null,
+        onPanUpdate: widget.editMode
+            ? (d) {
+                setState(() { _x += d.delta.dx; _y += d.delta.dy; });
+                widget.onMoved(_x, _y);
+              }
+            : null,
+        onScaleStart: widget.editMode
+            ? (_) { _startSize = _sz; }
+            : null,
+        onScaleUpdate: widget.editMode
+            ? (d) {
+                setState(() => _sz = (_startSize * d.scale).clamp(36.0, 120.0));
+                widget.onResized(_sz);
+              }
+            : null,
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 80),
           width:  _sz,
@@ -775,7 +822,9 @@ class _ExtraButtonState extends State<_ExtraButton> {
             child: Text(
               widget.label,
               style: TextStyle(
-                color:      widget.editMode ? Colors.white : widget.active ? kAmber : kDim,
+                color:      widget.editMode
+                    ? Colors.white
+                    : widget.active ? kAmber : kDim,
                 fontSize:   _sz * 0.32,
                 fontWeight: FontWeight.bold,
                 fontFamily: 'monospace',

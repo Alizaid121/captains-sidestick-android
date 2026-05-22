@@ -1,7 +1,7 @@
 name: captains_sidestick
 description: Flight simulator sidestick controller — connects to PC via WebSocket.
 publish_to: 'none'
-version: 1.0.0+1
+version: 2.2.1+6
 
 environment:
   sdk: '>=3.0.0 <4.0.0'

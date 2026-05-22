@@ -2,7 +2,7 @@
 //
 // Manages the WebSocket connection to the PC flight-sim server.
 //   • Connects to ws://[IP]:8888
-//   • Sends a full JSON frame every 50 ms
+//   • Sends a full JSON frame every 16 ms (≈60 Hz) — was 50 ms / 20 Hz
 //   • Auto-reconnects every 3 s on disconnect / error
 //
 // BUG FIX — connection state accuracy:
@@ -172,11 +172,11 @@ class WebSocketService extends ChangeNotifier {
     notifyListeners();
   }
 
-  // ── Send loop — 50 ms ────────────────────────────────────────────────────
+  // ── Send loop — 16 ms (≈60 Hz, was 50 ms / 20 Hz) ───────────────────────
   void _startSendLoop() {
     _sendTimer?.cancel();
     _sendTimer = Timer.periodic(
-      const Duration(milliseconds: 50),
+      const Duration(milliseconds: 16),
       (_) => _sendFrame(),
     );
   }
